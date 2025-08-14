@@ -1,0 +1,57 @@
+
+vault auth enable -path tfe jwt
+
+# FIXME, change URL below
+TFE_ISSUER_URL=https://tfe.example.com
+export TFE_ISSUER_URL
+
+vault write auth/tfe/config bound_issuer=$TFE_ISSUER_URL oidc_discovery_url=$TFE_ISSUER_URL
+
+cat << EOF > claim_mappings.json
+{"bound_audiences":"vault-token-exchange","role_type":"jwt","token_policies":"tfe_token_exchange","user_claim":"terraform_full_workspace",
+"claim_mappings": {"terraform_project_id":"terraform_project_id",
+  "terraform_workspace_id":"terraform_workspace_id",
+  "terraform_organization_id":"terraform_organization_id",
+  "terraform_full_workspace":"terraform_full_workspace",
+  "terraform_run_id":"terraform_run_id",
+  "terraform_run_phase":"terraform_run_phase",
+  "terraform_organization_name":"terraform_organization_name",
+  "terraform_project_name":"terraform_project_name",
+  "terraform_workspace_name":"terraform_workspace_name",
+  "role":"token_role"}}
+EOF
+
+vault write auth/tfe/role/tfe_token_exchange token_type=batch role_type=jwt ttl=24h
+
+curl -X PUT -H "X-Vault-Request: true" -H "X-Vault-Namespace:$VAULT_NAMESPACE" -H "X-Vault-Token: $(vault print token)" -d @claim_mappings.json  ${VAULT_ADDR}/v1/auth/tfe/role/tfe_token_exchange
+
+AUTH_ACCESSOR=`vault auth list | awk '/^tfe\//{print $3}'`
+export AUTH_ACCESSOR
+
+vault write identity/oidc/key/tfe_token_exchange verification_ttl=24h allowed_client_ids=TFE
+
+vault write identity/oidc/role/tfe_token_exchange key=tfe_token_exchange client_id=TFE ttl=24h template='{"role": {{identity.entity.aliases.'$AUTH_ACCESSOR'.metadata.role}}, "terraform_project_id": {{identity.entity.aliases.'$AUTH_ACCESSOR'.metadata.terraform_project_id}}, "terraform_workspace_id": {{identity.entity.aliases.'$AUTH_ACCESSOR'.metadata.terraform_workspace_id}}, "terraform_organization_id": {{identity.entity.aliases.'$AUTH_ACCESSOR'.metadata.terraform_organization_id}}, "terraform_full_workspace": {{identity.entity.aliases.'$AUTH_ACCESSOR'.metadata.terraform_full_workspace}}, "terraform_run_id": {{identity.entity.aliases.'$AUTH_ACCESSOR'.metadata.terraform_run_id}}, "terraform_run_phase": {{identity.entity.aliases.'$AUTH_ACCESSOR'.metadata.terraform_run_phase}}, "terraform_organization_name": {{identity.entity.aliases.'$AUTH_ACCESSOR'.metadata.terraform_organization_name}}, "terraform_project_name": {{identity.entity.aliases.'$AUTH_ACCESSOR'.metadata.terraform_project_name}}, "terraform_workspace_name": {{identity.entity.aliases.'$AUTH_ACCESSOR'.metadata.terraform_workspace_name}} }'
+
+cat << EOF > jwt_user.policy.hcl
+path "identity/oidc/token/tfe_token_exchange" {
+  	capabilities = ["read"]
+}
+
+# Allow tokens to query themselves
+path "auth/token/lookup-self" {
+  capabilities = ["read"]
+}
+
+# Allow tokens to renew themselves
+path "auth/token/renew-self" {
+    capabilities = ["update"]
+}
+
+# Allow tokens to revoke themselves
+path "auth/token/revoke-self" {
+    capabilities = ["update"]
+}
+EOF
+
+vault policy write tfe_token_exchange ./jwt_user.policy.hcl 
+
