@@ -1,0 +1,7 @@
+.*.swp
+*~
+
+.terraform*
+
+claim_mappings.json
+jwt_user.policy.hcl
